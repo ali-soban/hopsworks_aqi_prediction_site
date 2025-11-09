@@ -642,11 +642,6 @@ elif current_aqi_display_val != "N/A":
 else:
      st.warning("No current or forecast AQI data available to plot.")
 
-
-# --- AQI Categories Expander ---
-with st.expander("What do the AQI levels mean?"):
-    st.image("https://files.airnowtech.org/airnow/today/aqi_legend.jpg", caption="Source: US EPA AirNow")
-
 st.sidebar.header("About This Project")
 st.sidebar.info(
     "This app is part of the **Pearls AQI Predictor** project. "
