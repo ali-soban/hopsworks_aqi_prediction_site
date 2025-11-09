@@ -1,2 +1,7 @@
-requests
+streamlit
 pandas
+numpy
+joblib
+hopsworks[python]
+scikit-learn==1.5.1
+python-dotenv
