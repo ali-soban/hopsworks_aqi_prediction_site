@@ -22,7 +22,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           # Pin scikit-learn to ensure model consistency
-          pip install pandas joblib hopsworks scikit-learn==1.5.1
+          pip install pandas joblib "hopsworks[python]" scikit-learn==1.5.1
 
       - name: Run training script with Hopsworks
         env:
