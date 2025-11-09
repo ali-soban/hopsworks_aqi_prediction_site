@@ -20,6 +20,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          # *** UPDATED THIS LINE to include [python] extras ***
           pip install pandas requests numpy "hopsworks[python]"
 
       - name: Run feature pipeline script
@@ -82,7 +83,6 @@ jobs:
               for col in sub_indices_cols:
                   if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce')
 
-              # *** CHANGED TO LOWERCASE ***
               df['aqi'] = df[sub_indices_cols].max(axis=1, skipna=True)
               df_features = df.copy()
 
@@ -97,7 +97,6 @@ jobs:
               for col in weather_cols_to_lag:
                   if col not in df_features.columns: df_features[col] = np.nan
               
-              # *** CHANGED TO LOWERCASE ***
               df_features['aqi_lag_1hr'] = df_features['aqi'].shift(1)
               df_features['aqi_lag_3hr'] = df_features['aqi'].shift(3)
               df_features['aqi_lag_24hr'] = df_features['aqi'].shift(24)
@@ -107,22 +106,20 @@ jobs:
               df_features['wind_speed_lag_1hr'] = df_features['wind_speed_10m'].shift(1)
               df_features['aqi_rolling_3hr'] = df_features['aqi'].shift(1).rolling(window=3).mean()
               df_features['aqi_change_1hr'] = df_features['aqi'].shift(1) - df_features['aqi'].shift(2)
-              df_features['target_aqi'] = df_features['aqi'].shift(-72) # *** CHANGED TO LOWERCASE ***
+              df_features['target_aqi'] = df_features['aqi'].shift(-72) 
               
-              return df_features # Return only the feature-engineered dataframe
+              return df_features # Return the full feature-engineered dataframe
           
           print("--- STEP 2: DATA FETCHING ---")
           
           latitude = 24.86
           longitude = 67.01
-          # Fetch 10 days of history (for lags) and 3 days of future (for weather)
           fetch_days_past = 10
           fetch_days_future = 3
           now_utc = pd.to_datetime("now", utc=True)
 
-          # Define date ranges
           start_date_aq = (now_utc - pd.Timedelta(days=fetch_days_past)).strftime('%Y-%m-%d')
-          end_date_aq = now_utc.strftime('%Y-%m-%d') # AQ data only available up to 'today'
+          end_date_aq = now_utc.strftime('%Y-%m-%d')
           start_date_weather = start_date_aq
           end_date_weather = (now_utc + pd.Timedelta(days=fetch_days_future)).strftime('%Y-%m-%d')
           
@@ -156,7 +153,6 @@ jobs:
               "timezone": "UTC"
           }
           try:
-              # Fetch Past Weather
               end_date_past_weather = (now_utc - pd.Timedelta(days=1)).strftime('%Y-%m-%d')
               if start_date_weather <= end_date_past_weather:
                   past_params = {**weather_params, "start_date": start_date_weather, "end_date": end_date_past_weather}
@@ -168,7 +164,6 @@ jobs:
                       past_weather_df['time'] = pd.to_datetime(past_weather_df['time'], utc=True)
                       all_weather_dfs.append(past_weather_df)
 
-              # Fetch Future Weather (including today)
               end_date_weather_ts = pd.to_datetime(end_date_weather, utc=True)
               forecast_days_needed = (end_date_weather_ts - now_utc.normalize()).days + 1
               future_params = {**weather_params, "forecast_days": max(1, forecast_days_needed)}
@@ -191,7 +186,6 @@ jobs:
               print(f"ERROR: Failed to fetch weather data: {e}")
               exit(1)
 
-          # Combine AQ and Weather
           df_combined = aq_df.join(weather_df, how='outer').sort_index()
           if df_combined.index.tz is None:
               df_combined = df_combined.tz_localize('UTC')
@@ -206,42 +200,75 @@ jobs:
               print("ERROR: Feature creation failed.")
               exit(1)
           
-          # Add primary key (as integer timestamp)
           df_features['event_time'] = (df_features.index.astype('int64') // 10**9).astype(int)
           
+          # *** FIX 1: DEFINE THE FINAL SCHEMA WE WANT TO SAVE ***
+          # This list contains ALL columns for the Feature Group
+          final_feature_columns = [
+              'event_time', # Primary Key
+              'aqi', 'target_aqi', # Target and label
+              
+              # Cyclical Time Features
+              'hour_sin', 'hour_cos', 'day_of_week_sin', 'day_of_week_cos', 'month_sin', 'month_cos',
+              
+              # Weather Features
+              'temperature_2m', 'relative_humidity_2m', 'precipitation', 'wind_speed_10m', 'wind_direction_10m',
+              
+              # Lagged AQI Features
+              'aqi_lag_1hr', 'aqi_lag_3hr', 'aqi_lag_24hr', 'aqi_lag_72hr',
+              
+              # Lagged Weather Features
+              'temp_lag_1hr', 'humidity_lag_1hr', 'wind_speed_lag_1hr',
+              
+              # Rolling/Change Features
+              'aqi_rolling_3hr', 'aqi_change_1hr'
+          ]
+          
+          # Select ONLY these columns
+          df_to_insert = df_features[final_feature_columns]
+          
+          # *** FIX 2: FIX THE DATA TYPE FOR HUMIDITY ***
+          df_to_insert['relative_humidity_2m'] = df_to_insert['relative_humidity_2m'].astype(float)
+          
           # Drop rows with NaN in critical lag columns before inserting
-          df_features.dropna(
+          df_to_insert.dropna(
               subset=['aqi_lag_1hr', 'aqi_lag_24hr', 'aqi_lag_72hr', 'aqi_rolling_3hr'], 
               inplace=True
           )
           
-          if df_features.empty:
+          if df_to_insert.empty:
               print("ERROR: No data left after feature engineering and NaN drop.")
               exit(1)
           
-          print(f"Features engineered. Final shape to insert: {df_features.shape}")
+          print(f"Features engineered. Final shape to insert: {df_to_insert.shape}")
+          print("Final columns:", df_to_insert.columns.tolist())
 
           print("\n--- STEP 4: HOPSWORKS INSERT ---")
           try:
               print("Connecting to Hopsworks...")
               project = hopsworks.login(
                   api_key_value=os.environ['HOPSWORKS_API_KEY'],
-                  project="aqi_prediction_site"
+                  project=os.environ['HOPSWORKS_PROJECT_NAME']
               )
               fs = project.get_feature_store()
 
-              FEATURE_GROUP_NAME = "karachi_aqi_features" # This MUST match the name you created
-              FEATURE_GROUP_VERSION = 1 # This MUST match the version you created
+              FEATURE_GROUP_NAME = "karachi_aqi_features"
+              FEATURE_GROUP_VERSION = 1
               
-              print(f"Getting Feature Group: {FEATURE_GROUP_NAME} v{FEATURE_GROUP_VERSION}")
-              aqi_fg = fs.get_feature_group(
+              print(f"Getting or creating Feature Group: {FEATURE_GROUP_NAME} v{FEATURE_GROUP_VERSION}")
+              
+              # *** FIX 3: USE get_or_create_feature_group ***
+              # This will create the FG with the *correct* schema from our DataFrame
+              aqi_fg = fs.get_or_create_feature_group(
                   name=FEATURE_GROUP_NAME,
-                  version=FEATURE_GROUP_VERSION
+                  version=FEATURE_GROUP_VERSION,
+                  primary_key=['event_time'],
+                  event_time='event_time',
+                  description="Hourly features for Karachi AQI prediction"
               )
               
-              print(f"Inserting {len(df_features)} rows into Hopsworks...")
-              # This will append new data and update existing rows based on the primary key (event_time)
-              aqi_fg.insert(df_features, write_options={"wait_for_job": True})
+              print(f"Inserting {len(df_to_insert)} rows into Hopsworks...")
+              aqi_fg.insert(df_to_insert, write_options={"wait_for_job": True})
               print("Data insertion complete.")
 
           except Exception as e:
