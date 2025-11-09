@@ -1,4 +1,5 @@
-# This script runs hourly to fetch new data and feed the HFS.
+# This file must be saved in: .github/workflows/feature_pipeline.yml
+# This script runs hourly to fetch new data and feed the Hopsworks Feature Store.
 
 name: Hourly Feature Update (to Hopsworks)
 
@@ -26,6 +27,7 @@ jobs:
           HOPSWORKS_API_KEY: ${{ secrets.HOPSWORKS_API_KEY }}
           HOPSWORKS_PROJECT_NAME: ${{ secrets.HOPSWORKS_PROJECT_NAME }}
         run: |
+          python - <<EOF
           import pandas as pd
           import numpy as np
           import requests
@@ -80,6 +82,7 @@ jobs:
               for col in sub_indices_cols:
                   if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce')
 
+              # *** CHANGED TO LOWERCASE ***
               df['aqi'] = df[sub_indices_cols].max(axis=1, skipna=True)
               df_features = df.copy()
 
@@ -94,6 +97,7 @@ jobs:
               for col in weather_cols_to_lag:
                   if col not in df_features.columns: df_features[col] = np.nan
               
+              # *** CHANGED TO LOWERCASE ***
               df_features['aqi_lag_1hr'] = df_features['aqi'].shift(1)
               df_features['aqi_lag_3hr'] = df_features['aqi'].shift(3)
               df_features['aqi_lag_24hr'] = df_features['aqi'].shift(24)
@@ -103,7 +107,7 @@ jobs:
               df_features['wind_speed_lag_1hr'] = df_features['wind_speed_10m'].shift(1)
               df_features['aqi_rolling_3hr'] = df_features['aqi'].shift(1).rolling(window=3).mean()
               df_features['aqi_change_1hr'] = df_features['aqi'].shift(1) - df_features['aqi'].shift(2)
-              df_features['target_aqi'] = df_features['aqi'].shift(-72)
+              df_features['target_aqi'] = df_features['aqi'].shift(-72) # *** CHANGED TO LOWERCASE ***
               
               return df_features # Return only the feature-engineered dataframe
           
@@ -245,3 +249,4 @@ jobs:
               exit(1)
 
           print("\n--- FEATURE PIPELINE SCRIPT COMPLETED ---")
+          EOF

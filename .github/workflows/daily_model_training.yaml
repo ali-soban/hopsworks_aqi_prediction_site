@@ -1,4 +1,7 @@
-# This script runs daily to train a new model from the Feature Store and save to registry
+# This file must be saved in: .github/workflows/train_pipeline.yml
+# This script runs daily to train a new model from the Feature Store
+# and save it to the Model Registry.
+
 name: Daily Model Training (from Hopsworks)
 
 on:
@@ -26,6 +29,7 @@ jobs:
           HOPSWORKS_API_KEY: ${{ secrets.HOPSWORKS_API_KEY }}
           HOPSWORKS_PROJECT_NAME: ${{ secrets.HOPSWORKS_PROJECT_NAME }}
         run: |
+          python - <<EOF
           import pandas as pd
           import numpy as np
           from sklearn.ensemble import ExtraTreesRegressor
@@ -77,6 +81,7 @@ jobs:
                    print("ERROR: 'event_time' primary key not found.")
                    exit(1)
 
+              # *** CHANGED TO LOWERCASE ***
               # This is our training data: all rows where the target is not null
               df_train = df.dropna(subset=['target_aqi'])
               
@@ -91,6 +96,7 @@ jobs:
           print(f"Training Data loaded: {df_train.shape[0]} rows.")
 
           # --- PREPARE X and y ---
+          # *** CHANGED TO LOWERCASE ***
           TARGET_COLUMN = 'target_aqi'
           expected_features = [
               'hour_sin', 'hour_cos', 'day_of_week_sin', 'day_of_week_cos', 'month_sin', 'month_cos',
@@ -125,9 +131,9 @@ jobs:
           print("Model training complete.")
           
           # Save model locally first
-          local_model_path = 'aqi_model_extratrees.joblib'
-          joblib.dump(model, local_model_path)
-          print(f"Model saved locally as '{local_model_path}'")
+          local_model_file = 'aqi_model_extratrees.joblib'
+          joblib.dump(model, local_model_file)
+          print(f"Model saved locally as '{local_model_file}'")
 
           # --- EVALUATE AND SAVE TO REGISTRY ---
           print("\nEvaluating model on training data (for reference)...")
@@ -141,17 +147,30 @@ jobs:
           print("\nSaving model to Hopsworks Model Registry...")
           try:
               mr = project.get_model_registry()
+              
+              # Create the schema (input/output) for the model
+              from hsml.schema import Schema
+              from hsml.model_schema import ModelSchema
+
+              input_schema = Schema(X)
+              output_schema = Schema(y)
+              model_schema = ModelSchema(input_schema=input_schema, output_schema=output_schema)
+              
               hopsworks_model = mr.sklearn.create_model(
                   name=MODEL_NAME_REGISTRY,
                   metrics=metrics,
                   description="AQI Predictor (ExtraTreesRegressor) trained via GitHub Actions",
-                  input_example=X.sample(min(5, len(X))), # Use DataFrame for input example
-                  signature={"predict": {"inputs": list(X.columns), "outputs": ["predicted_aqi"]}}
+                  input_example=X.sample(min(5, len(X))), 
+                  model_schema=model_schema
               )
+              
               # Save the model artifact to Hopsworks
-              hopsworks_model.save(local_model_path)
+              # Note: hopsworks_model.save() will save the file as 'model.joblib' by default
+              hopsworks_model.save(local_model_file)
+              
               print(f"Model successfully saved to Hopsworks Registry as '{MODEL_NAME_REGISTRY}' version {hopsworks_model.version}")
           except Exception as e:
               print(f"ERROR: Could not save model to Hopsworks Model Registry: {e}")
 
           print("\n--- TRAINING PIPELINE SCRIPT COMPLETED ---")
+          EOF
