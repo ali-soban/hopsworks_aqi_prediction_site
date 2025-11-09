@@ -155,7 +155,7 @@ def create_features(df_raw):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    df['AQI'] = df[sub_indices_cols].max(axis=1, skipna=True)
+    df['aqi'] = df[sub_indices_cols].max(axis=1, skipna=True)
 
     # Make a copy for feature engineering AFTER calculating AQI on the full set
     df_features = df.copy()
@@ -182,17 +182,17 @@ def create_features(df_raw):
         if col not in df_features.columns:
              df_features[col] = np.nan # Add missing weather cols as NaN if needed
 
-    df_features['aqi_lag_1hr'] = df_features['AQI'].shift(1)
-    df_features['aqi_lag_3hr'] = df_features['AQI'].shift(3)
-    df_features['aqi_lag_24hr'] = df_features['AQI'].shift(24)
-    df_features['aqi_lag_72hr'] = df_features['AQI'].shift(72)
+    df_features['aqi_lag_1hr'] = df_features['aqi'].shift(1)
+    df_features['aqi_lag_3hr'] = df_features['aqi'].shift(3)
+    df_features['aqi_lag_24hr'] = df_features['aqi'].shift(24)
+    df_features['aqi_lag_72hr'] = df_features['aqi'].shift(72)
     df_features['temp_lag_1hr'] = df_features['temperature_2m'].shift(1)
     df_features['humidity_lag_1hr'] = df_features['relative_humidity_2m'].shift(1)
     df_features['wind_speed_lag_1hr'] = df_features['wind_speed_10m'].shift(1)
 
     # 4. Create Rolling Window & Rate of Change Features
-    df_features['aqi_rolling_3hr'] = df_features['AQI'].shift(1).rolling(window=3).mean()
-    df_features['aqi_change_1hr'] = df_features['AQI'].shift(1) - df_features['AQI'].shift(2)
+    df_features['aqi_rolling_3hr'] = df_features['aqi'].shift(1).rolling(window=3).mean()
+    df_features['aqi_change_1hr'] = df_features['aqi'].shift(1) - df_features['aqi'].shift(2)
 
     # Return the dataframe with calculated AQI (for current value) and the feature-engineered dataframe
     # Ensure both returned dataframes retain the original index timezone if it was present
@@ -387,7 +387,7 @@ def get_forecast_data():
 
 
     # Find the last index time <= now_utc where AQI is valid
-    valid_aqi_times = df_with_aqi_utc['AQI'].dropna().index
+    valid_aqi_times = df_with_aqi_utc['aqi'].dropna().index
     if not valid_aqi_times.empty:
          # Filter times before or equal to now_utc
          relevant_times = valid_aqi_times[valid_aqi_times <= now_utc]
@@ -404,7 +404,7 @@ def get_forecast_data():
          st.warning("Could not determine the latest available AQI time.")
     else:
         try:
-            current_aqi = df_with_aqi_utc.loc[latest_available_time_utc, 'AQI']
+            current_aqi = df_with_aqi_utc.loc[latest_available_time_utc, 'aqi']
         except KeyError:
             current_aqi = np.nan
             st.warning(f"Timestamp {latest_available_time_utc} found but not in index for AQI lookup.")
