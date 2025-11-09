@@ -226,7 +226,7 @@ jobs:
               print("Connecting to Hopsworks...")
               project = hopsworks.login(
                   api_key_value=os.environ['HOPSWORKS_API_KEY'],
-                  project=os.environ['HOPSWORKS_PROJECT_NAME']
+                  project="aqi_prediction_site"
               )
               fs = project.get_feature_store()
 
