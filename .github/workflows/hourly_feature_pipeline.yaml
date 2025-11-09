@@ -1,0 +1,264 @@
+# .github/workflows/feature_pipeline.yml
+
+name: Hourly Feature Update Pipeline
+
+# Controls when the workflow will run
+on:
+  schedule:
+    # Runs "at minute 0 past every hour" (e.g., 1:00, 2:00, 3:00 UTC)
+    - cron: '0 * * * *'
+  workflow_dispatch: # Allows manual triggering from the Actions tab
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  # This workflow contains a single job called "update-features"
+  update-features:
+    # The type of runner that the job will run on
+    runs-on: ubuntu-latest
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Sets up Python
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      # Installs dependencies using pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas requests numpy
+
+      # Runs the Python script to fetch data and create features
+      - name: Run feature engineering script
+        id: run_script
+        run: |
+          # --- Combined Python Script for Feature Engineering ---
+          import pandas as pd
+          import numpy as np
+          import requests
+          import warnings
+          import datetime
+
+          warnings.filterwarnings('ignore', category=pd.errors.SettingWithCopyWarning)
+          warnings.filterwarnings('ignore', category=UserWarning)
+
+          print("--- STEP 1: DATA FETCHING ---")
+          latitude = 24.86
+          longitude = 67.01
+          fetch_days_past = 10 # Need enough history for lags
+          fetch_days_future = 3 # Need weather forecast for feature consistency (though target is not needed here)
+          now_utc = pd.to_datetime("now", utc=True)
+          start_date_aq = (now_utc - pd.Timedelta(days=fetch_days_past)).strftime('%Y-%m-%d')
+          end_date_aq = now_utc.strftime('%Y-%m-%d')
+          start_date_weather = start_date_aq
+          end_date_weather = (now_utc + pd.Timedelta(days=fetch_days_future)).strftime('%Y-%m-%d')
+
+          print(f"Fetching data for Karachi (UTC): {start_date_aq} to {end_date_weather}")
+
+          # Fetch Air Quality Data
+          air_quality_url = "https://air-quality-api.open-meteo.com/v1/air-quality"
+          aq_params = {
+              "latitude": latitude, "longitude": longitude, "start_date": start_date_aq, "end_date": end_date_aq,
+              "hourly": "pm10,pm2_5,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone", "timezone": "UTC"
+          }
+          try:
+              aq_response = requests.get(air_quality_url, params=aq_params, timeout=60)
+              aq_response.raise_for_status()
+              aq_data = aq_response.json()
+              aq_df = pd.DataFrame(aq_data['hourly'])
+              aq_df['time'] = pd.to_datetime(aq_df['time'], utc=True)
+              aq_df.set_index('time', inplace=True)
+              print("AQ data fetched.")
+          except Exception as e:
+              print(f"ERROR: Failed to fetch air quality data: {e}")
+              exit(1)
+
+          # Fetch Weather Data (Past & Future)
+          weather_url_archive = "https://archive-api.open-meteo.com/v1/archive"
+          weather_url_forecast = "https://api.open-meteo.com/v1/forecast"
+          weather_params = {
+              "latitude": latitude, "longitude": longitude,
+              "hourly": "temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m,wind_direction_10m",
+              "timezone": "UTC"
+          }
+          all_weather_dfs = []
+          try:
+              end_date_past_weather = (now_utc - pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+              if start_date_weather <= end_date_past_weather:
+                  past_params = {**weather_params, "start_date": start_date_weather, "end_date": end_date_past_weather}
+                  past_response = requests.get(weather_url_archive, params=past_params, timeout=60)
+                  past_response.raise_for_status()
+                  past_data = past_response.json()
+                  if 'hourly' in past_data and past_data['hourly'] and 'time' in past_data['hourly']:
+                      past_df = pd.DataFrame(past_data['hourly'])
+                      past_df['time'] = pd.to_datetime(past_df['time'], utc=True)
+                      all_weather_dfs.append(past_df)
+
+              end_date_weather_ts = pd.to_datetime(end_date_weather, utc=True)
+              forecast_days_needed = (end_date_weather_ts - now_utc.normalize()).days + 1
+              future_params = {**weather_params, "forecast_days": max(1, forecast_days_needed)}
+              future_response = requests.get(weather_url_forecast, params=future_params, timeout=60)
+              future_response.raise_for_status()
+              future_data = future_response.json()
+              if 'hourly' in future_data and future_data['hourly'] and 'time' in future_data['hourly']:
+                   future_df = pd.DataFrame(future_data['hourly'])
+                   future_df['time'] = pd.to_datetime(future_df['time'], utc=True)
+                   all_weather_dfs.append(future_df)
+
+              if not all_weather_dfs: raise ValueError("No weather data fetched.")
+              weather_df_combined = pd.concat(all_weather_dfs, ignore_index=True)
+              weather_df_combined.set_index('time', inplace=True)
+              weather_df = weather_df_combined[~weather_df_combined.index.duplicated(keep='first')].sort_index()
+              print("Weather data fetched and combined.")
+          except Exception as e:
+              print(f"ERROR: Failed to fetch weather data: {e}")
+              exit(1)
+
+          # Combine AQ and Weather
+          df_combined = aq_df.join(weather_df, how='outer').sort_index()
+          if df_combined.index.tz is None: df_combined = df_combined.tz_localize('UTC')
+          elif df_combined.index.tz != datetime.timezone.utc: df_combined = df_combined.tz_convert('UTC')
+
+          print(f"Combined data shape: {df_combined.shape}")
+
+          print("\n--- STEP 2: AQI CALCULATION ---")
+          # --- AQI Calculation Constants and Functions ---
+          PM25_BREAKPOINTS = [
+              ((0.0, 12.0), (0, 50)), ((12.1, 35.4), (51, 100)), ((35.5, 55.4), (101, 150)),
+              ((55.5, 150.4), (151, 200)), ((150.5, 250.4), (201, 300)), ((250.5, 350.4), (301, 400)),
+              ((350.5, 500.4), (401, 500)),]
+          PM10_BREAKPOINTS = [
+              ((0, 54), (0, 50)), ((55, 154), (51, 100)), ((155, 254), (101, 150)),
+              ((255, 354), (151, 200)), ((355, 424), (201, 300)), ((425, 504), (301, 400)),
+              ((505, 604), (401, 500)),]
+          O3_BREAKPOINTS = [ ((0, 106), (0, 50)), ((107, 137), (51, 100)), ((138, 167), (101, 150)),
+              ((168, 206), (151, 200)), ((207, 392), (201, 300))]
+          CO_BREAKPOINTS = [ ((0, 5040), (0, 50)), ((5041, 10760), (51, 100)), ((10761, 14200), (101, 150)),
+              ((14201, 17600), (151, 200)), ((17601, 34800), (201, 300)), ((34801, 46300), (301, 400)),
+              ((46301, 57800), (401, 500)),]
+          SO2_BREAKPOINTS = [ ((0, 92), (0, 50)), ((93, 197), (51, 100)), ((198, 482), (101, 150)),
+              ((483, 795), (151, 200)),]
+          NO2_BREAKPOINTS = [ ((0, 100), (0, 50)), ((101, 188), (51, 100)), ((189, 677), (101, 150)),
+              ((678, 1220), (151, 200)), ((1221, 2330), (201, 300)), ((2331, 3080), (301, 400)),
+              ((3081, 3835), (401, 500)),]
+
+          def calculate_sub_index(concentration, breakpoints):
+              if not isinstance(concentration, (int, float, np.number)) or pd.isna(concentration): return np.nan
+              for i, ((cl, ch), (al, ah)) in enumerate(breakpoints):
+                  if i == 0 and cl <= concentration <= ch:
+                      return round(((ah - al) / (ch - cl)) * (concentration - cl) + al) if ch != cl else float(al)
+                  elif i > 0 and cl < concentration <= ch:
+                      return round(((ah - al) / (ch - cl)) * (concentration - cl) + al) if ch != cl else float(al)
+              if breakpoints and concentration > breakpoints[-1][0][1]:
+                  return breakpoints[-1][1][1] if len(breakpoints[-1]) > 1 and len(breakpoints[-1][1]) > 1 else 500
+              if breakpoints and concentration < breakpoints[0][0][0]:
+                  return breakpoints[0][1][0] if len(breakpoints[0]) > 1 and len(breakpoints[0][1]) > 0 else 0
+              return np.nan
+
+          pollutant_cols = ['pm10', 'pm2_5', 'carbon_monoxide', 'nitrogen_dioxide', 'sulphur_dioxide', 'ozone']
+          for col in pollutant_cols: df_combined[col] = pd.to_numeric(df_combined[col], errors='coerce')
+
+          df_combined['pm2_5_subindex'] = df_combined['pm2_5'].apply(lambda x: calculate_sub_index(x, PM25_BREAKPOINTS))
+          # ... (apply for all other pollutants) ...
+          df_combined['pm10_subindex'] = df_combined['pm10'].apply(lambda x: calculate_sub_index(x, PM10_BREAKPOINTS))
+          df_combined['ozone_subindex'] = df_combined['ozone'].apply(lambda x: calculate_sub_index(x, O3_BREAKPOINTS))
+          df_combined['carbon_monoxide_subindex'] = df_combined['carbon_monoxide'].apply(lambda x: calculate_sub_index(x, CO_BREAKPOINTS))
+          df_combined['sulphur_dioxide_subindex'] = df_combined['sulphur_dioxide'].apply(lambda x: calculate_sub_index(x, SO2_BREAKPOINTS))
+          df_combined['nitrogen_dioxide_subindex'] = df_combined['nitrogen_dioxide'].apply(lambda x: calculate_sub_index(x, NO2_BREAKPOINTS))
+
+          sub_indices_cols = ['pm2_5_subindex', 'pm10_subindex', 'ozone_subindex', 'carbon_monoxide_subindex', 'sulphur_dioxide_subindex', 'nitrogen_dioxide_subindex']
+          for col in sub_indices_cols: df_combined[col] = pd.to_numeric(df_combined[col], errors='coerce')
+          df_combined['AQI'] = df_combined[sub_indices_cols].max(axis=1, skipna=True)
+
+          df_features = df_combined.copy() # Start feature engineering from here
+          print("AQI calculated.")
+
+          print("\n--- STEP 3: FEATURE ENGINEERING ---")
+          # Create Cyclical Features
+          if isinstance(df_features.index, pd.DatetimeIndex):
+              df_features['hour_sin'] = np.sin(2 * np.pi * df_features.index.hour / 23.0)
+              df_features['hour_cos'] = np.cos(2 * np.pi * df_features.index.hour / 23.0)
+              df_features['day_of_week_sin'] = np.sin(2 * np.pi * df_features.index.dayofweek / 6.0)
+              df_features['day_of_week_cos'] = np.cos(2 * np.pi * df_features.index.dayofweek / 6.0)
+              df_features['month_sin'] = np.sin(2 * np.pi * df_features.index.month / 12.0)
+              df_features['month_cos'] = np.cos(2 * np.pi * df_features.index.month / 12.0)
+          else:
+              print("ERROR: Index is not DatetimeIndex before creating cyclical features.")
+              exit(1)
+
+          # Create Lagged Features
+          weather_cols_to_lag = ['temperature_2m', 'relative_humidity_2m', 'wind_speed_10m']
+          for col in weather_cols_to_lag:
+              if col not in df_features.columns: df_features[col] = np.nan
+          df_features['aqi_lag_1hr'] = df_features['AQI'].shift(1)
+          df_features['aqi_lag_3hr'] = df_features['AQI'].shift(3)
+          df_features['aqi_lag_24hr'] = df_features['AQI'].shift(24)
+          df_features['aqi_lag_72hr'] = df_features['AQI'].shift(72)
+          df_features['temp_lag_1hr'] = df_features['temperature_2m'].shift(1)
+          df_features['humidity_lag_1hr'] = df_features['relative_humidity_2m'].shift(1)
+          df_features['wind_speed_lag_1hr'] = df_features['wind_speed_10m'].shift(1)
+
+          # Create Rolling Window & Rate of Change Features
+          df_features['aqi_rolling_3hr'] = df_features['AQI'].shift(1).rolling(window=3).mean()
+          df_features['aqi_change_1hr'] = df_features['AQI'].shift(1) - df_features['AQI'].shift(2)
+          print("Features engineered.")
+
+          # Define Target (Needed for consistency, though not used in this pipeline step)
+          FORECAST_HORIZON = 72
+          df_features['target_AQI'] = df_features['AQI'].shift(-FORECAST_HORIZON)
+
+          # Clean NaNs created by lagging/rolling - IMPORTANT for training later
+          df_model_ready = df_features.dropna(subset=[ # Drop only if lags/rolling are NaN
+              'aqi_lag_1hr', 'aqi_lag_3hr', 'aqi_lag_24hr', 'aqi_lag_72hr',
+              'temp_lag_1hr', 'humidity_lag_1hr', 'wind_speed_lag_1hr',
+              'aqi_rolling_3hr', 'aqi_change_1hr'
+          ])
+          # Keep rows where target_AQI might be NaN (future data points)
+
+          print(f"Final feature data shape: {df_model_ready.shape}")
+
+          # Select and Save Features
+          columns_to_keep = [
+              'hour_sin', 'hour_cos', 'day_of_week_sin', 'day_of_week_cos', 'month_sin', 'month_cos',
+              'temperature_2m', 'relative_humidity_2m', 'precipitation', 'wind_speed_10m', 'wind_direction_10m',
+              'aqi_lag_1hr', 'aqi_lag_3hr', 'aqi_lag_24hr', 'aqi_lag_72hr',
+              'temp_lag_1hr', 'humidity_lag_1hr', 'wind_speed_lag_1hr',
+              'aqi_rolling_3hr', 'aqi_change_1hr',
+              'target_AQI' # Keep target column for training pipeline
+          ]
+
+          # Ensure all columns exist before selecting
+          final_df_to_save = pd.DataFrame(index=df_model_ready.index)
+          for col in columns_to_keep:
+               if col in df_model_ready.columns:
+                   final_df_to_save[col] = df_model_ready[col]
+               else:
+                   print(f"Warning: Column {col} not found during final selection.")
+                   final_df_to_save[col] = np.nan # Add as NaN if missing
+
+          output_file = 'latest_features.csv'
+          try:
+              final_df_to_save.to_csv(output_file)
+              print(f"Successfully saved features to {output_file}")
+          except Exception as e:
+              print(f"ERROR: Could not save features to CSV: {e}")
+              exit(1)
+
+          print("\n--- FEATURE PIPELINE SCRIPT COMPLETED ---")
+
+
+      # Commits the updated CSV file back to the repository
+      - name: Commit changes
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add latest_features.csv
+          # Commit only if there are changes
+          git diff --staged --quiet || git commit -m "Update latest features data via GitHub Actions"
+          git push
